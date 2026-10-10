@@ -1,0 +1,5 @@
+gymnasium
+numpy
+PyYAML
+stable-baselines3
+tensorboard

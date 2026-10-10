@@ -1,0 +1,11 @@
+replica_capacity: 100
+provisioning_delay: 6
+min_replicas: 1
+max_replicas: 20
+
+replica_cost: 1.0
+latency_limit_ms: 200
+latency_penalty: 25.0
+latency_severity_penalty: 2.0
+latency_severity_cap: 5.0
+invalid_action_penalty: 10.0

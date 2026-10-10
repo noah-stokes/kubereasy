@@ -1,0 +1,5 @@
+episode_length: 1000
+base_rps: 200
+peak_rps: 600
+period: 200
+noise_std: 10
