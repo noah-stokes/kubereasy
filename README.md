@@ -8,6 +8,41 @@ The project starts with a local simulator where a PPO agent and rule-based autos
 
 The research workflow in [`model/`](model/) is implemented: simulate workloads, train a policy, and compare it with deterministic baselines. The Kubernetes runtime, deployment manifests, observability assets, and shared contracts are scaffolded for future development. Running the simulator requires no Kubernetes cluster.
 
+## Project architecture
+
+The implemented research workflow produces a policy and its normalization statistics for evaluation. The dashed connection shows the planned path from those artifacts to a Kubernetes controller; the runtime components below are still scaffolded.
+
+```mermaid
+flowchart TB
+    subgraph Research["Implemented: model research and evaluation"]
+        Config["System and workload YAML"] --> Simulator["DevOpsEnv simulator<br/>Traffic, queues, replicas, latency"]
+        Simulator --> Training["PPO training<br/>Flatten and normalize observations"]
+        Training --> Artifacts["Saved policy + normalization statistics"]
+        Artifacts --> Evaluation["Evaluation<br/>Same seeded traffic for every policy"]
+        Baselines["CPU, traffic, and no-op baselines"] --> Evaluation
+        Simulator --> Evaluation
+        Evaluation --> Results["Mean episode reward + standard deviation"]
+    end
+
+    subgraph Runtime["Planned: Kubernetes autoscaling runtime"]
+        Telemetry["Telemetry<br/>Collect cluster metrics"] --> Features["Features<br/>Build policy observations"]
+        Features --> Inference["Inference<br/>Normalize inputs and predict action"]
+        Inference --> Safety["Safety checks<br/>Bounds, cooldowns, fallback"]
+        Safety --> Scaling["Scaling<br/>Kubernetes scale API"]
+        Scaling --> Cluster["Kubernetes workloads"]
+        Cluster --> Telemetry
+    end
+
+    Artifacts -. "Future deployment" .-> Inference
+
+    classDef implemented fill:#ecfdf5,stroke:#047857,color:#064e3b
+    classDef artifact fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
+    classDef planned fill:#f8fafc,stroke:#64748b,color:#334155,stroke-dasharray:5 5
+    class Config,Simulator,Training,Evaluation,Baselines,Results implemented
+    class Artifacts artifact
+    class Telemetry,Features,Inference,Safety,Scaling,Cluster planned
+```
+
 ## Quick start
 
 Clone the repository and create a Python virtual environment inside `model/`:
@@ -83,6 +118,50 @@ The reward penalizes active replica cost at every step. Latency above the config
 | `no_op` | Keeps the starting replica count throughout the episode. |
 
 The deterministic policies live in [`model/agents/baselines.py`](model/agents/baselines.py).
+
+## How PPO learns to scale
+
+**Proximal Policy Optimization (PPO)** learns from interaction with the simulator. Its **actor** assigns probabilities to the three scaling actions; its **critic** estimates the discounted future reward from the current observation. During training, actions are sampled from the actor's distribution so the agent can explore different decisions.
+
+```mermaid
+flowchart TB
+    subgraph Interaction["Interact with the simulator"]
+        Environment["DevOpsEnv<br/>Apply delayed scaling and compute penalties"]
+        Environment -->|Observation| Input["Flatten + normalize"]
+        Input --> Actor["Actor network<br/>Probabilities: hold, scale up, scale down"]
+        Actor -->|Sample scaling action| Environment
+        Input --> Critic["Critic network<br/>Estimate future reward"]
+    end
+
+    subgraph Learning["Learn after each 256-step rollout"]
+        Buffer["Stored experience<br/>Observations, actions, rewards, values, log probabilities"]
+        Buffer --> Advantage["Estimate advantage<br/>Was the outcome better than expected?"]
+        Advantage --> Update["Optimize in batches of 64<br/>Clipped policy objective + value prediction loss"]
+    end
+
+    Environment -->|Rewards and episode boundaries| Buffer
+    Actor -->|Actions and log probabilities| Buffer
+    Critic -->|Value estimates| Buffer
+    Input -->|Observations| Buffer
+    Update -->|Update policy weights| Actor
+    Update -->|Update value weights| Critic
+
+    classDef environment fill:#ecfdf5,stroke:#047857,color:#064e3b
+    classDef network fill:#eff6ff,stroke:#2563eb,color:#1e3a8a
+    classDef learning fill:#fffbeb,stroke:#b45309,color:#78350f
+    class Environment,Input environment
+    class Actor,Critic network
+    class Buffer,Advantage,Update learning
+```
+
+1. **Collect experience.** The current policy interacts with one simulated environment for 256 steps. Each reward reflects replica cost, latency penalties, and any rejected scaling request.
+2. **Estimate advantage.** PPO compares the rewards and estimated future value with the critic's prediction to estimate whether an action did better or worse than expected.
+3. **Improve the policy.** Actions with positive advantage become more likely, while those with negative advantage become less likely. PPO uses a clipped objective to discourage abrupt changes in action probabilities, and trains the critic to improve its value estimates.
+4. **Repeat.** The updated policy collects another rollout and learns again until the training run finishes. See the [original PPO paper](https://arxiv.org/abs/1707.06347) and [Stable-Baselines3 PPO documentation](https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html) for the algorithm and implementation details.
+
+In [`model/training/train.py`](model/training/train.py), the actor and critic each have two hidden layers of 64 units. Observations are flattened and normalized with `VecNormalize`; rewards retain their original scale. The model and normalization statistics are saved together so evaluation can reuse the same input transformation.
+
+This objective lets the agent learn about delayed consequences: an extra replica costs money now but may reduce queue buildup and latency penalties later. During evaluation, normalization statistics are frozen and the policy selects the most likely action deterministically. The baseline comparison measures whether the learned policy achieves a better total reward under the tested workloads.
 
 ## Configuration
 
